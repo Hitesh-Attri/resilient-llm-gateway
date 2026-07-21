@@ -1,0 +1,50 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "resilient-llm-gateway"
+version = "0.1.0"
+description = "Provider-agnostic LLM gateway with fallback across OpenAI, Anthropic, and AWS Bedrock"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "pydantic>=2.9",
+    "pydantic-settings>=2.6",
+    # Provider SDKs are lazy-imported, but a deployed container needs them present:
+    "openai>=1.55",
+    "anthropic>=0.40",
+    "boto3>=1.35",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "httpx",
+    "ruff",
+]
+
+# This is the key line: it makes src/ the import root, so `core`, `providers`,
+# and `api` are top-level importable packages. `pip install -e .` then wires
+# them onto the path everywhere (app, tests, scripts) with no PYTHONPATH hacks.
+[tool.setuptools]
+package-dir = { "" = "src" }
+py-modules = ["main"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+# Lets tests import `core.*` without installing the package first.
+pythonpath = ["src"]
+
+[tool.ruff]
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
