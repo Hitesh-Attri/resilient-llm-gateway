@@ -18,8 +18,8 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 
-from .provider import Provider, ProviderError
-from .types import ChatRequest, ChatResponse
+from core.provider import Provider, ProviderError
+from core.types import ChatRequest, ChatResponse
 
 logger = logging.getLogger("llm_gateway")
 

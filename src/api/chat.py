@@ -9,9 +9,9 @@ from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException, Request
 
-from ..core.gateway import AllProvidersFailedError
-from ..core.provider import ProviderError
-from ..core.types import ChatRequest, ChatResponse
+from core.gateway import AllProvidersFailedError
+from core.provider import ProviderError
+from core.types import ChatRequest, ChatResponse
 
 router = APIRouter(prefix="/v1", tags=["chat"])
 

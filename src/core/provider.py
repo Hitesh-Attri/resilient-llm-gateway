@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from typing import Protocol, runtime_checkable
 
-from .types import ChatRequest, ChatResponse
+from core.types import ChatRequest, ChatResponse
 
 
 class ProviderError(Exception):

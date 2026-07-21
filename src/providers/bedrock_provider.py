@@ -21,8 +21,8 @@ import asyncio
 import time
 from typing import Any
 
-from ..core.provider import ProviderError
-from ..core.types import ChatRequest, ChatResponse, Usage
+from core.provider import ProviderError
+from core.types import ChatRequest, ChatResponse, Usage
 
 _RETRYABLE_CODES = {
     "ThrottlingException",

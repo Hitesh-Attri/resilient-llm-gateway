@@ -14,8 +14,8 @@ from functools import lru_cache
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from .gateway import LLMGateway, Target
-from .provider import Provider
+from core.gateway import LLMGateway, Target
+from core.provider import Provider
 
 
 class Settings(BaseSettings):
@@ -39,21 +39,21 @@ def _construct_provider(name: str, settings: Settings) -> Provider:
     are only triggered here, so the core package stays importable without any
     vendor SDK installed."""
     if name == "openai":
-        from ..providers.openai_provider import OpenAIProvider
+        from providers.openai_provider import OpenAIProvider
 
         if not settings.openai_api_key:
             raise ValueError("openai in chain but OPENAI_API_KEY is not set")
         return OpenAIProvider(api_key=settings.openai_api_key)
 
     if name == "anthropic":
-        from ..providers.anthropic_provider import AnthropicProvider
+        from providers.anthropic_provider import AnthropicProvider
 
         if not settings.anthropic_api_key:
             raise ValueError("anthropic in chain but ANTHROPIC_API_KEY is not set")
         return AnthropicProvider(api_key=settings.anthropic_api_key)
 
     if name == "bedrock":
-        from ..providers.bedrock_provider import BedrockProvider
+        from providers.bedrock_provider import BedrockProvider
 
         return BedrockProvider(region=settings.aws_region)
 
