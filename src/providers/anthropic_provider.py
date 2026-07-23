@@ -12,8 +12,8 @@ from __future__ import annotations
 import time
 from typing import Any
 
-from ..core.provider import ProviderError
-from ..core.types import ChatRequest, ChatResponse, Usage
+from core.provider import ProviderError
+from core.types import ChatRequest, ChatResponse, Usage
 
 
 class AnthropicProvider:

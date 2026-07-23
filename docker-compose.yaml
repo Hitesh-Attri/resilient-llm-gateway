@@ -1,0 +1,20 @@
+services:
+  gateway:
+    build: .
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      # Ready for the semantic-cache slice; the app ignores it until then.
+      - REDIS_URL=redis://redis:6379/0
+    depends_on:
+      - redis
+    # For Bedrock locally, either put AWS_* keys in .env, or mount your creds:
+    # volumes:
+    #   - ~/.aws:/home/appuser/.aws:ro
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
