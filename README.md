@@ -76,10 +76,58 @@ curl -s localhost:8000/v1/chat -H 'content-type: application/json' -d '{
 }' | jq
 ```
 
+## Understanding the request body
+
+The model is stateless and, under the hood, sees the whole request flattened
+into one labeled transcript that it continues from. Two fields shape that:
+
+- **`messages`** - the conversation, each entry tagged with a **`role`**:
+  - `user` - what the human said
+  - `assistant` - what the model said on a previous turn
+  - `system` - not part of the dialogue; instructions on *how* to behave
+
+  The roles let the model track whose turn it is. The model has no memory between
+  calls: to continue a conversation you resend the prior `user`/`assistant` turns,
+  and the labels are what let it reconstruct who said what.
+
+- **`system`** - a privileged instruction channel set by you (the app), separate
+  from the conversation. It steers *how* the model answers ("be terse", "reply in
+  JSON", "you are a support agent for Acme") independent of *what* is asked. This
+  is why `ChatRequest` keeps it as its own field: Anthropic/Bedrock take it
+  top-level, OpenAI folds it in as a `role: "system"` message, and the adapters
+  normalize that difference.
+
+Same question, only `system` changing - watch the *shape* of the answer change
+while the facts stay the same:
+
+```bash
+# Terse -> one clipped line
+curl -s localhost:8000/v1/chat -H 'content-type: application/json' -d '{
+  "messages":[{"role":"user","content":"What is a token bucket?"}],
+  "system":"You are terse. Answer in one sentence and nothing more."
+}' | jq -r .content
+
+# Pedagogical -> longer, structured explanation
+curl -s localhost:8000/v1/chat -H 'content-type: application/json' -d '{
+  "messages":[{"role":"user","content":"What is a token bucket?"}],
+  "system":"You are a distinguished professor. Be thorough and pedagogical."
+}' | jq -r .content
+
+# Structured -> machine-parseable output you could consume downstream
+curl -s localhost:8000/v1/chat -H 'content-type: application/json' -d '{
+  "messages":[{"role":"user","content":"What is a token bucket?"}],
+  "system":"Respond only in valid JSON with keys \"definition\" and \"use_case\"."
+}' | jq -r .content
+```
+
+Steering behavior through the system prompt is most of what prompt engineering
+is, and it's where later modules put "answer only from the provided context,
+cite sources" (RAG) and "you may call these tools" (agents).
+
 ## Test
 
 ```bash
-pytest                           # 5 fallback tests, no API keys needed
+pytest                           # fallback + classification tests, no API keys needed
 ```
 
 ## Design decisions worth knowing
