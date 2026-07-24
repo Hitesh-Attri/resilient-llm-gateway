@@ -20,8 +20,9 @@ from dataclasses import dataclass
 
 from core.provider import Provider, ProviderError
 from core.types import ChatRequest, ChatResponse
+from core.log import get_logger
 
-logger = logging.getLogger("llm_gateway")
+logger = get_logger(__name__)
 
 
 @dataclass(frozen=True)

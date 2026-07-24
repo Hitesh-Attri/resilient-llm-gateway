@@ -26,7 +26,21 @@ class Settings(BaseSettings):
 
     openai_api_key: str | None = None
     anthropic_api_key: str | None = None
-    aws_region: str = "us-east-1"
+    aws_region: str = "ap-south-1"
+
+    # OpenAI-compatible providers (free tiers - useful for learning and as
+    # genuine fallback lanes).
+    groq_api_key: str | None = None
+    gemini_api_key: str | None = None
+    ollama_base_url: str = "http://localhost:11434/v1"
+
+
+# Providers that speak OpenAI's wire format, so they reuse OpenAIProvider.
+# name -> (base_url, settings attribute holding the key)
+_OPENAI_COMPATIBLE = {
+    "groq": ("https://api.groq.com/openai/v1", "groq_api_key"),
+    "gemini": ("https://generativelanguage.googleapis.com/v1beta/openai/", "gemini_api_key"),
+}
 
 
 @lru_cache
@@ -51,6 +65,21 @@ def _construct_provider(name: str, settings: Settings) -> Provider:
         if not settings.anthropic_api_key:
             raise ValueError("anthropic in chain but ANTHROPIC_API_KEY is not set")
         return AnthropicProvider(api_key=settings.anthropic_api_key)
+
+    if name in _OPENAI_COMPATIBLE:
+        from providers.openai_provider import OpenAIProvider
+
+        base_url, key_attr = _OPENAI_COMPATIBLE[name]
+        api_key = getattr(settings, key_attr)
+        if not api_key:
+            raise ValueError(f"{name} in chain but {key_attr.upper()} is not set")
+        return OpenAIProvider(api_key=api_key, base_url=base_url, name=name)
+
+    if name == "ollama":
+        # Local models: no key needed, but the SDK requires a non-empty string.
+        from providers.openai_provider import OpenAIProvider
+
+        return OpenAIProvider(api_key="ollama", base_url=settings.ollama_base_url, name="ollama")
 
     if name == "bedrock":
         from providers.bedrock_provider import BedrockProvider

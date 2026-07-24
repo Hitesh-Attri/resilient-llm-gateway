@@ -15,17 +15,30 @@ from __future__ import annotations
 
 import time
 
-from core.provider import ProviderError
+from core.provider import ProviderError, should_failover
 from core.types import ChatRequest, ChatResponse, Usage
 
 
 class OpenAIProvider:
-    name = "openai"
+    """Serves OpenAI *and* any OpenAI-compatible endpoint (Groq, Gemini's compat
+    layer, OpenRouter, Cerebras, Ollama, vLLM) by pointing `base_url` elsewhere.
 
-    def __init__(self, api_key: str) -> None:
+    A large slice of the ecosystem cloned OpenAI's wire format, so one adapter
+    plus a URL covers many vendors. This is the payoff of the adapter pattern:
+    four new providers for zero new adapter code.
+
+    `name` is overridable so logs and ChatResponse.provider say "groq", not
+    "openai" - otherwise you can't tell who actually served a request.
+    """
+
+    def __init__(self, api_key: str, *, base_url: str | None = None, name: str = "openai") -> None:
         from openai import AsyncOpenAI  # lazy import
 
-        self._client = AsyncOpenAI(api_key=api_key)
+        self.name = name
+        # max_retries=0: the SDK retries any 429 by default, including
+        # insufficient_quota which can never succeed. The gateway owns retry and
+        # fallback policy, so the vendor SDK should not silently retry underneath it.
+        self._client = AsyncOpenAI(api_key=api_key, base_url=base_url, max_retries=0)
 
     async def complete(self, request: ChatRequest, *, model: str) -> ChatResponse:
         from openai import APIConnectionError, APIStatusError, RateLimitError
@@ -48,10 +61,12 @@ class OpenAIProvider:
         except APIConnectionError as e:
             raise ProviderError(str(e), provider=self.name, retryable=True) from e
         except APIStatusError as e:
+            # insufficient_quota also arrives as a 4xx, so classify on the
+            # message too - see should_failover.
             raise ProviderError(
                 str(e),
                 provider=self.name,
-                retryable=e.status_code >= 500,
+                retryable=should_failover(e.status_code, str(e)),
                 status_code=e.status_code,
             ) from e
         latency_ms = (time.perf_counter() - start) * 1000

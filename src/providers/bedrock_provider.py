@@ -24,12 +24,17 @@ from typing import Any
 from core.provider import ProviderError
 from core.types import ChatRequest, ChatResponse, Usage
 
-_RETRYABLE_CODES = {
-    "ThrottlingException",
-    "ServiceUnavailableException",
-    "InternalServerException",
-    "ModelTimeoutException",
-}
+# Bedrock signals failures with botocore error codes, not HTTP status, so it
+# classifies here rather than via core.provider.should_failover - but with the
+# same default: FAIL OVER unless the error means every provider would reject the
+# request identically. Since ChatRequest is already validated upstream, the only
+# botocore code that qualifies is a genuinely malformed Converse payload.
+# (Unknown model IDs also raise ValidationException, but those are per-rung and
+# SHOULD fail over - so we accept the rare false fail-fast rather than sniff
+# messages here. If that bites, narrow it by inspecting the message.)
+_FAIL_FAST_CODES = frozenset({
+    "SerializationException",  # malformed request structure - broken everywhere
+})
 
 
 class BedrockProvider:
@@ -66,7 +71,7 @@ class BedrockProvider:
             raise ProviderError(
                 str(e),
                 provider=self.name,
-                retryable=code in _RETRYABLE_CODES,
+                retryable=code not in _FAIL_FAST_CODES,
             ) from e
         latency_ms = (time.perf_counter() - start) * 1000
 
