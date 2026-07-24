@@ -141,11 +141,24 @@ pytest                           # fallback + classification tests, no API keys 
 - **Lazy SDK imports.** The core imports with zero vendor SDKs installed; adapters
   import their SDK only when constructed.
 
+## Reliability: two nested loops
+
+- **Inner (retry):** on a *transient* failure (real rate limit, 5xx, timeout,
+  connection drop) the gateway retries the **same** target up to
+  `RETRY_MAX_ATTEMPTS` times, with exponential backoff + full jitter
+  (`RETRY_BASE_DELAY` growing to `RETRY_MAX_DELAY`).
+- **Outer (fallback):** when a target is exhausted, or fails with a retryable but
+  *non-transient* error (no credits, bad key, retired model), the gateway falls
+  **over** to the next target.
+
+The `ProviderError.transient` flag drives the inner loop, `retryable` drives the
+outer one. A no-credits 429 is retryable-but-not-transient, so it fails over
+immediately instead of wasting backoff on a provider that can't recover.
+
 ## Not built yet (next slices, in order)
 
-1. Per-target retries with exponential backoff + jitter (before failing over).
-2. Streaming responses (SSE).
-3. Structured outputs (Pydantic schema -> provider tool/JSON mode).
-4. Redis semantic cache + provider prompt caching.
-5. Per-key token budgets + rate limiting.
-6. Tracing (Langfuse / OpenTelemetry) + eval suite.
+1. Streaming responses (SSE).
+2. Structured outputs (Pydantic schema -> provider tool/JSON mode).
+3. Redis semantic cache + provider prompt caching.
+4. Per-key token budgets + rate limiting.
+5. Tracing (Langfuse / OpenTelemetry) + eval suite.
