@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import time
 
-from core.provider import ProviderError, should_failover
+from core.provider import ProviderError, is_transient, should_failover
 from core.types import ChatRequest, ChatResponse, Usage
 
 
@@ -57,17 +57,28 @@ class OpenAIProvider:
                 temperature=request.temperature,
             )
         except RateLimitError as e:
-            raise ProviderError(str(e), provider=self.name, retryable=True, status_code=429) from e
+            # 429 covers both real rate limits (transient) and insufficient_quota
+            # (not) - is_transient reads the message to tell them apart.
+            raise ProviderError(
+                str(e),
+                provider=self.name,
+                retryable=True,
+                status_code=429,
+                transient=is_transient(429, str(e)),
+            ) from e
         except APIConnectionError as e:
-            raise ProviderError(str(e), provider=self.name, retryable=True) from e
+            raise ProviderError(
+                str(e), provider=self.name, retryable=True, transient=True
+            ) from e
         except APIStatusError as e:
             # insufficient_quota also arrives as a 4xx, so classify on the
-            # message too - see should_failover.
+            # message too - see should_failover / is_transient.
             raise ProviderError(
                 str(e),
                 provider=self.name,
                 retryable=should_failover(e.status_code, str(e)),
                 status_code=e.status_code,
+                transient=is_transient(e.status_code, str(e)),
             ) from e
         latency_ms = (time.perf_counter() - start) * 1000
 

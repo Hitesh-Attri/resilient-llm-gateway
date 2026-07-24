@@ -39,7 +39,7 @@ def get_logger(name):
         
     # update formatter - add request_id
     formatter = logging.Formatter(
-        '%(asctime)s - %(name)s - %(levelname)s - %(funcName)s - [%(filename)s:%(lineno)d] - [request_id:%(request_id)s] - %(message)s'
+        '%(asctime)s - %(name)s - %(levelname)s - %(funcName)s - [%(filename)s:%(lineno)d] - [request_id: %(request_id)s] - %(message)s'
     )
     
     # add formatter to console handler

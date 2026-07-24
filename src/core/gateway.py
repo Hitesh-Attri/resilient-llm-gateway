@@ -1,24 +1,30 @@
-"""The gateway: an ordered chain of (provider, model) targets tried in sequence.
+"""The gateway: an ordered chain of (provider, model) targets, with two loops.
 
-This is the piece you asked to build. The logic is small on purpose - the value
-is in getting the failure semantics exactly right:
+  INNER (retry):    on a TRANSIENT failure (rate limit, 5xx, timeout), retry the
+                    SAME target a few times with exponential backoff + jitter.
+  OUTER (fallback): when a target is exhausted or fails with a non-transient but
+                    retryable error, fall OVER to the next target.
 
-  - success            -> return immediately, tagged with which target served it
-  - retryable failure  -> log and try the next target
-  - non-retryable      -> raise now; failing over cannot help a malformed/unauthorized request
-  - every target fails  -> raise AllProvidersFailedError with the full error trail
+Outcomes:
+  - success               -> return, tagged with which target served it
+  - transient failure     -> back off and retry the same target
+  - retryable (not transient) -> fall over to the next target immediately
+  - fail-fast failure     -> raise now (a broken request helps nowhere)
+  - every target fails    -> AllProvidersFailedError with the full error trail
 
-You'll recognize the shape: it's the same "try, classify the failure, decide
-retry-vs-abort" pattern you already run across your SQS-Lambda pipeline, just
-with LLM providers as the unreliable downstream instead of a flaky integration.
+Same shape as the retry/fallback logic in your SQS-Lambda pipeline: retry the
+flaky downstream a bounded number of times, then route around it.
 """
 
 from __future__ import annotations
 
-import logging
+import asyncio
+import random
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
 from core.provider import Provider, ProviderError
+from core.retry import RetryPolicy, full_jitter_delay
 from core.types import ChatRequest, ChatResponse
 from core.log import get_logger
 
@@ -45,10 +51,21 @@ class AllProvidersFailedError(Exception):
 
 
 class LLMGateway:
-    def __init__(self, chain: list[Target]) -> None:
+    def __init__(
+        self,
+        chain: list[Target],
+        *,
+        retry: RetryPolicy | None = None,
+        # Injectable so tests run with no real delay and deterministic jitter.
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        rand: Callable[[], float] = random.random,
+    ) -> None:
         if not chain:
             raise ValueError("gateway requires at least one target in the chain")
         self._chain = chain
+        self._retry = retry or RetryPolicy()
+        self._sleep = sleep
+        self._rand = rand
 
     @property
     def chain_labels(self) -> list[str]:
@@ -59,18 +76,17 @@ class LLMGateway:
 
         for index, target in enumerate(self._chain):
             try:
-                response = await target.provider.complete(request, model=target.model)
+                response = await self._attempt_target(target, request)
             except ProviderError as error:
                 errors.append(error)
 
                 if not error.retryable:
-                    # The request/config is the problem. Another provider would
-                    # reject it too, so don't waste a call - surface it now.
+                    # The request is broken in a way no provider can serve.
                     logger.error("non-retryable failure on %s: %s", target.label, error)
                     raise
 
                 logger.warning(
-                    "retryable failure on %s (%s); falling over to next target",
+                    "target %s exhausted (%s); falling over to next target",
                     target.label,
                     error,
                 )
@@ -81,3 +97,30 @@ class LLMGateway:
             return response
 
         raise AllProvidersFailedError(errors)
+
+    async def _attempt_target(self, target: Target, request: ChatRequest) -> ChatResponse:
+        """The inner retry loop: try one target up to max_attempts times, backing
+        off between transient failures. Non-transient errors (and the final
+        attempt) propagate straight to the outer fallback loop."""
+        for attempt in range(1, self._retry.max_attempts + 1):
+            try:
+                return await target.provider.complete(request, model=target.model)
+            except ProviderError as error:
+                is_last = attempt == self._retry.max_attempts
+                if not error.transient or is_last:
+                    raise  # let the outer loop decide fail-over vs fail-fast
+
+                delay = full_jitter_delay(attempt - 1, self._retry, self._rand)
+                logger.warning(
+                    "transient failure on %s (attempt %d/%d): %s; retrying in %.2fs",
+                    target.label,
+                    attempt,
+                    self._retry.max_attempts,
+                    error,
+                    delay,
+                )
+                await self._sleep(delay)
+
+        # Unreachable: the loop either returns or raises on the last attempt.
+        raise AssertionError("retry loop exited without returning or raising")
+    

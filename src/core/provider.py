@@ -21,17 +21,30 @@ from core.types import ChatRequest, ChatResponse
 
 
 class ProviderError(Exception):
-    """Normalized provider failure.
+    """Normalized provider failure carrying TWO orthogonal decisions.
 
-    The question `retryable` answers is NOT "was this transient?" but:
-    "could a DIFFERENT provider succeed with this same request?"
+    They answer different questions, and conflating them was an earlier bug:
 
-    retryable=True  -> the provider can't serve us right now: rate limit, 5xx,
-                       timeout, connection, exhausted credits, bad/expired key.
-                       Fail OVER - another provider is likely fine.
-    retryable=False -> the REQUEST itself is invalid (malformed body, unknown
-                       model, context-length exceeded). Every provider would
-                       reject it, so fail FAST rather than burn the whole chain.
+    retryable -> "could a DIFFERENT provider succeed?" Drives the outer FALLBACK
+                 loop (walk to the next rung). True for almost everything, since
+                 the model/credits/key belong to the rung, not the request.
+
+    transient -> "might the SAME provider succeed if I wait and retry?" Drives the
+                 inner RETRY loop (backoff on this rung before moving on). True
+                 only for genuinely temporary conditions: rate limits, 5xx,
+                 timeouts, connection errors.
+
+    Invariant: transient implies retryable (worth retrying here => worth failing
+    over after). The classification helpers below guarantee it.
+
+    Examples:
+      429 rate limit      -> transient=True,  retryable=True   (retry, then fail over)
+      429 insufficient_quota / 400 no credits
+                          -> transient=False, retryable=True   (fail over now, no retry)
+      401 bad key         -> transient=False, retryable=True   (fail over now)
+      404 model retired   -> transient=False, retryable=True   (fail over now)
+      405 method not allowed
+                          -> transient=False, retryable=False  (fail fast)
     """
 
     def __init__(
@@ -41,11 +54,13 @@ class ProviderError(Exception):
         provider: str,
         retryable: bool,
         status_code: int | None = None,
+        transient: bool = False,
     ) -> None:
         super().__init__(message)
         self.provider = provider
         self.retryable = retryable
         self.status_code = status_code
+        self.transient = transient
 
 
 # Statuses that mean "this exact request is malformed and EVERY provider will
@@ -85,6 +100,32 @@ def should_failover(status_code: int, message: str) -> bool:
     and the aggregate error trail is preserved in AllProvidersFailedError.
     """
     return status_code not in _FAIL_FAST_STATUSES
+
+
+# Substrings that mark a 429 as "no more money", not "slow down". Retrying these
+# never helps, so the inner retry loop must skip them and fail over immediately.
+#
+# Note: this is the same fragile message-sniffing we deleted from should_failover
+# last round - but it is SAFE here in a way it was not there. On the failover
+# path a wrong guess changed the OUTCOME (chain stopped early). Here it only
+# affects EFFICIENCY: if a marker is missed, we waste a couple of backoff sleeps
+# and then fail over correctly anyway. Same technique, very different blast
+# radius - fragility is acceptable on an efficiency-only path.
+_NON_TRANSIENT_MARKERS = ("insufficient_quota", "credit balance", "quota", "billing")
+
+
+def is_transient(status_code: int, message: str) -> bool:
+    """Should the SAME provider be retried after a short backoff?
+
+    True only for genuinely temporary conditions. 429 is the tricky one: a real
+    rate limit is transient (wait and it clears), but an exhausted quota wearing
+    a 429 is not - so we look at the message for that single case.
+    """
+    if status_code >= 500:
+        return True
+    if status_code in (408, 429):
+        return not any(m in message.lower() for m in _NON_TRANSIENT_MARKERS)
+    return False
 
 
 @runtime_checkable
