@@ -12,7 +12,7 @@ from __future__ import annotations
 import time
 from typing import Any
 
-from core.provider import ProviderError
+from core.provider import ProviderError, should_failover
 from core.types import ChatRequest, ChatResponse, Usage
 
 
@@ -44,11 +44,12 @@ class AnthropicProvider:
         except APIConnectionError as e:
             raise ProviderError(str(e), provider=self.name, retryable=True) from e
         except APIStatusError as e:
-            # 5xx is transient; 4xx (bad request, auth) is not.
+            # Note: exhausted credits arrive as a 400, so status alone is not
+            # enough - should_failover also inspects the message.
             raise ProviderError(
                 str(e),
                 provider=self.name,
-                retryable=e.status_code >= 500,
+                retryable=should_failover(e.status_code, str(e)),
                 status_code=e.status_code,
             ) from e
         latency_ms = (time.perf_counter() - start) * 1000
