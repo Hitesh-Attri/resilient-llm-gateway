@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "resilient-llm-gateway"
 version = "0.1.0"
-description = "Provider-agnostic LLM gateway with fallback across OpenAI, Anthropic, and AWS Bedrock"
+description = "Provider-agnostic LLM gateway with fallback across Gemini, Groq, OpenAI, Anthropic, and AWS Bedrock"
 requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.115",
