@@ -48,38 +48,43 @@ class ProviderError(Exception):
         self.status_code = status_code
 
 
-# Substrings that mark a 4xx as an ACCOUNT problem rather than a request problem.
-# Providers signal "you're out of money" with a 400, which is indistinguishable
-# from a malformed request by status code alone - so we look at the message.
-# Message sniffing is fragile, which is why it is confined to this one place.
-_ACCOUNT_FAILURE_MARKERS = (
-    "credit balance",
-    "billing",
-    "quota",
-    "insufficient_quota",
-    "payment",
-    "exceeded your current quota",
-)
+# Statuses that mean "this exact request is malformed and EVERY provider will
+# reject it identically" - so walking the chain only wastes calls. This is the
+# short list. Everything NOT here fails over.
+#
+# Why the list is short: ChatRequest is Pydantic-validated at the API boundary,
+# so structurally broken requests are already rejected with a 422 before any
+# provider is called. By the time an adapter runs, the request is well-formed,
+# and nearly every remaining 4xx is a TARGET problem (retired/unknown model,
+# no credits, bad key, prompt too long FOR THIS model) - exactly what the next
+# rung exists to survive. The model ID belongs to the rung, not the request, so
+# "model not found" says nothing about the next provider's model.
+_FAIL_FAST_STATUSES = frozenset({
+    405,  # method not allowed - wrong verb, wrong everywhere
+    406,  # not acceptable
+    414,  # URI too long
+    415,  # unsupported media type
+})
 
 
 def should_failover(status_code: int, message: str) -> bool:
-    """Decide whether an HTTP failure should fail OVER to the next provider.
+    """Should this HTTP failure fail OVER to the next provider (True) or fail
+    FAST and surface now (False)?
 
-    Shared by the OpenAI and Anthropic adapters (both are HTTP/status based).
-    Bedrock classifies on botocore error codes instead.
+    Default is FAIL OVER. For a multi-provider gateway, availability is the whole
+    point, and most 4xx errors that reach here are specific to the current target
+    (its model ID, its credits, its key), not intrinsic to the request. We fail
+    fast only for the narrow set of statuses that would break identically on
+    every provider.
+
+    Shared by the OpenAI and Anthropic adapters (HTTP/status based). Bedrock
+    classifies on botocore error codes instead.
+
+    Tradeoff: a genuinely broken request now costs one call per rung (N x latency
+    and cost) before erroring. That's acceptable because the failure is bounded
+    and the aggregate error trail is preserved in AllProvidersFailedError.
     """
-    if status_code >= 500:
-        return True
-    if status_code in (408, 429):  # timeout, rate limited
-        return True
-    if status_code in (401, 403):
-        # Bad or expired key for THIS provider. Another provider may well work,
-        # so prefer availability - but this must be alarmed on, not swallowed.
-        return True
-    if status_code == 400 and any(m in message.lower() for m in _ACCOUNT_FAILURE_MARKERS):
-        return True
-    # Genuine bad request: malformed body, unknown model, context too long.
-    return False
+    return status_code not in _FAIL_FAST_STATUSES
 
 
 @runtime_checkable
