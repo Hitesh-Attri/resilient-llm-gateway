@@ -19,7 +19,7 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 from core.provider import ProviderError, is_transient, should_failover
-from core.types import ChatRequest, ChatResponse, StreamChunk, Usage
+from core.types import ChatRequest, ChatResponse, StreamChunk, Usage, normalize_finish_reason
 
 
 class OpenAICompatibleProvider:
@@ -104,6 +104,7 @@ class OpenAICompatibleProvider:
                 output_tokens=usage.completion_tokens if usage else 0,
             ),
             latency_ms=latency_ms,
+            finish_reason=normalize_finish_reason(choice.finish_reason),
         )
 
     async def stream(self, request: ChatRequest, *, model: str) -> AsyncIterator[StreamChunk]:
@@ -124,6 +125,7 @@ class OpenAICompatibleProvider:
 
         start = time.perf_counter()
         usage: Usage | None = None
+        finish_raw: str | None = None
         try:
             events = await self._client.chat.completions.create(**kwargs)
             async for event in events:
@@ -133,7 +135,10 @@ class OpenAICompatibleProvider:
                         output_tokens=event.usage.completion_tokens,
                     )
                 if event.choices:
-                    piece = event.choices[0].delta.content
+                    choice = event.choices[0]
+                    if choice.finish_reason:  # set on the last content chunk
+                        finish_raw = choice.finish_reason
+                    piece = choice.delta.content
                     if piece:
                         yield StreamChunk(delta=piece)
         except APIError as e:
@@ -145,4 +150,5 @@ class OpenAICompatibleProvider:
             model=model,
             usage=usage or Usage(),
             latency_ms=(time.perf_counter() - start) * 1000,
+            finish_reason=normalize_finish_reason(finish_raw),
         )

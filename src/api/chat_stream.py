@@ -33,6 +33,7 @@ def _chunk_to_event(chunk: StreamChunk) -> dict:
             "model": chunk.model,
             "usage": chunk.usage.model_dump() if chunk.usage else None,
             "latency_ms": chunk.latency_ms,
+            "finish_reason": chunk.finish_reason.value if chunk.finish_reason else None,
         }
     return {"type": "delta", "content": chunk.delta}
 

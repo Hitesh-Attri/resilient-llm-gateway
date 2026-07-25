@@ -42,15 +42,57 @@ class Usage(BaseModel):
     output_tokens: int = 0
 
 
+class FinishReason(str, Enum):
+    """Normalized reason generation stopped. Each provider has its own vocabulary
+    (OpenAI 'length', Anthropic/Bedrock 'max_tokens', ...); we map them all here
+    so a caller can check `finish_reason == FinishReason.length` without knowing
+    which provider served the request. `length` is the one that means 'truncated'."""
+
+    stop = "stop"                      # natural completion
+    length = "length"                  # hit max_tokens - output was cut off
+    content_filter = "content_filter"  # blocked by safety/guardrails
+    tool_call = "tool_call"            # stopped to call a tool
+    other = "other"                    # anything unmapped
+
+
+# All providers' raw stop reasons -> our normalized enum. The raw strings don't
+# collide across providers, so one table covers them all.
+_FINISH_REASON_MAP = {
+    # OpenAI-compatible
+    "stop": FinishReason.stop,
+    "length": FinishReason.length,
+    "content_filter": FinishReason.content_filter,
+    "tool_calls": FinishReason.tool_call,
+    "function_call": FinishReason.tool_call,
+    # Anthropic
+    "end_turn": FinishReason.stop,
+    "stop_sequence": FinishReason.stop,
+    "max_tokens": FinishReason.length,
+    "tool_use": FinishReason.tool_call,
+    "refusal": FinishReason.content_filter,
+    # Bedrock Converse
+    "content_filtered": FinishReason.content_filter,
+    "guardrail_intervened": FinishReason.content_filter,
+}
+
+
+def normalize_finish_reason(raw: str | None) -> FinishReason:
+    if raw is None:
+        return FinishReason.other
+    return _FINISH_REASON_MAP.get(raw.lower(), FinishReason.other)
+
+
 class ChatResponse(BaseModel):
     """What every provider returns, normalized. `provider` and `model` tell you
-    which target actually served the request - critical once fallback is in play."""
+    which target actually served the request - critical once fallback is in play.
+    `finish_reason` tells you WHY it stopped - `length` means it was truncated."""
 
     content: str
     model: str
     provider: str
     usage: Usage
     latency_ms: float
+    finish_reason: FinishReason | None = None
 
 
 class StreamChunk(BaseModel):
@@ -58,7 +100,7 @@ class StreamChunk(BaseModel):
 
     Two shapes flow through the same type:
       - a text piece:   delta="Hello", finished=False
-      - the final event: finished=True, with provider/model/usage/latency filled in
+      - the final event: finished=True, with provider/model/usage/latency/finish_reason
 
     Keeping both in one type lets a provider's stream be a single async iterator
     the gateway can relay without special-casing, and the SSE layer maps each to
@@ -70,3 +112,4 @@ class StreamChunk(BaseModel):
     model: str | None = None
     usage: Usage | None = None
     latency_ms: float | None = None
+    finish_reason: FinishReason | None = None

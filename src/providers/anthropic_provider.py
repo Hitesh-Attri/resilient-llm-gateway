@@ -14,7 +14,7 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 from core.provider import ProviderError, is_transient, should_failover
-from core.types import ChatRequest, ChatResponse, StreamChunk, Usage
+from core.types import ChatRequest, ChatResponse, StreamChunk, Usage, normalize_finish_reason
 
 
 class AnthropicProvider:
@@ -74,6 +74,7 @@ class AnthropicProvider:
             provider=self.name,
             usage=Usage(input_tokens=resp.usage.input_tokens, output_tokens=resp.usage.output_tokens),
             latency_ms=latency_ms,
+            finish_reason=normalize_finish_reason(resp.stop_reason),
         )
 
     async def stream(self, request: ChatRequest, *, model: str) -> AsyncIterator[StreamChunk]:
@@ -81,6 +82,7 @@ class AnthropicProvider:
 
         start = time.perf_counter()
         usage = Usage()
+        finish_raw: str | None = None
         try:
             # messages.stream() gives an async text_stream plus a final message
             # carrying usage - cleaner than parsing raw SSE events by hand.
@@ -92,10 +94,12 @@ class AnthropicProvider:
                     input_tokens=final.usage.input_tokens,
                     output_tokens=final.usage.output_tokens,
                 )
+                finish_raw = final.stop_reason
         except APIError as e:
             raise self._map_error(e) from e
 
         yield StreamChunk(
             finished=True, provider=self.name, model=model, usage=usage,
             latency_ms=(time.perf_counter() - start) * 1000,
+            finish_reason=normalize_finish_reason(finish_raw),
         )
