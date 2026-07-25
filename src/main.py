@@ -8,6 +8,7 @@ from contextlib import asynccontextmanager
 
 
 from api.chat import router as chat_router
+from api.chat_stream import router as chat_stream_router
 from api.health import router as health_router
 from core.config import build_gateway, get_settings
 from core.log import get_logger
@@ -31,6 +32,7 @@ app.add_middleware(RequestMiddleware)
 
 app.include_router(health_router)
 app.include_router(chat_router)
+app.include_router(chat_stream_router)
 
 
 if __name__ == "__main__":

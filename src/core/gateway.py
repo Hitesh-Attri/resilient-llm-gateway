@@ -1,26 +1,32 @@
-"""The gateway: an ordered chain of (provider, model) targets tried in sequence.
+"""The gateway: an ordered chain of (provider, model) targets, with two loops.
 
-This is the piece you asked to build. The logic is small on purpose - the value
-is in getting the failure semantics exactly right:
+  INNER (retry):    on a TRANSIENT failure (rate limit, 5xx, timeout), retry the
+                    SAME target a few times with exponential backoff + jitter.
+  OUTER (fallback): when a target is exhausted or fails with a non-transient but
+                    retryable error, fall OVER to the next target.
 
-  - success            -> return immediately, tagged with which target served it
-  - retryable failure  -> log and try the next target
-  - non-retryable      -> raise now; failing over cannot help a malformed/unauthorized request
-  - every target fails  -> raise AllProvidersFailedError with the full error trail
+Outcomes:
+  - success               -> return, tagged with which target served it
+  - transient failure     -> back off and retry the same target
+  - retryable (not transient) -> fall over to the next target immediately
+  - fail-fast failure     -> raise now (a broken request helps nowhere)
+  - every target fails    -> AllProvidersFailedError with the full error trail
 
-You'll recognize the shape: it's the same "try, classify the failure, decide
-retry-vs-abort" pattern you already run across your SQS-Lambda pipeline, just
-with LLM providers as the unreliable downstream instead of a flaky integration.
+Same shape as the retry/fallback logic in your SQS-Lambda pipeline: retry the
+flaky downstream a bounded number of times, then route around it.
 """
 
 from __future__ import annotations
 
-import logging
+import asyncio
+import random
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 
-from core.provider import Provider, ProviderError
-from core.types import ChatRequest, ChatResponse
 from core.log import get_logger
+from core.provider import Provider, ProviderError
+from core.retry import RetryPolicy, full_jitter_delay
+from core.types import ChatRequest, ChatResponse, StreamChunk
 
 logger = get_logger(__name__)
 
@@ -45,10 +51,21 @@ class AllProvidersFailedError(Exception):
 
 
 class LLMGateway:
-    def __init__(self, chain: list[Target]) -> None:
+    def __init__(
+        self,
+        chain: list[Target],
+        *,
+        retry: RetryPolicy | None = None,
+        # Injectable so tests run with no real delay and deterministic jitter.
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        rand: Callable[[], float] = random.random,
+    ) -> None:
         if not chain:
             raise ValueError("gateway requires at least one target in the chain")
         self._chain = chain
+        self._retry = retry or RetryPolicy()
+        self._sleep = sleep
+        self._rand = rand
 
     @property
     def chain_labels(self) -> list[str]:
@@ -59,18 +76,17 @@ class LLMGateway:
 
         for index, target in enumerate(self._chain):
             try:
-                response = await target.provider.complete(request, model=target.model)
+                response = await self._attempt_target(target, request)
             except ProviderError as error:
                 errors.append(error)
 
                 if not error.retryable:
-                    # The request/config is the problem. Another provider would
-                    # reject it too, so don't waste a call - surface it now.
+                    # The request is broken in a way no provider can serve.
                     logger.error("non-retryable failure on %s: %s", target.label, error)
                     raise
 
                 logger.warning(
-                    "retryable failure on %s (%s); falling over to next target",
+                    "target %s exhausted (%s); falling over to next target",
                     target.label,
                     error,
                 )
@@ -81,3 +97,107 @@ class LLMGateway:
             return response
 
         raise AllProvidersFailedError(errors)
+
+    async def _attempt_target(self, target: Target, request: ChatRequest) -> ChatResponse:
+        """The inner retry loop: try one target up to max_attempts times, backing
+        off between transient failures. Non-transient errors (and the final
+        attempt) propagate straight to the outer fallback loop."""
+        for attempt in range(1, self._retry.max_attempts + 1):
+            try:
+                return await target.provider.complete(request, model=target.model)
+            except ProviderError as error:
+                is_last = attempt == self._retry.max_attempts
+                if not error.transient or is_last:
+                    raise  # let the outer loop decide fail-over vs fail-fast
+
+                delay = full_jitter_delay(attempt - 1, self._retry, self._rand)
+                logger.warning(
+                    "transient failure on %s (attempt %d/%d): %s; retrying in %.2fs",
+                    target.label,
+                    attempt,
+                    self._retry.max_attempts,
+                    error,
+                    delay,
+                )
+                await self._sleep(delay)
+
+        # Unreachable: the loop either returns or raises on the last attempt.
+        raise AssertionError("retry loop exited without returning or raising")
+
+    async def stream(self, request: ChatRequest) -> AsyncIterator[StreamChunk]:
+        """Streaming counterpart to complete().
+
+        The critical difference: retry and fallback can ONLY happen before the
+        first token reaches the caller. Once we yield a delta, the client has
+        partial output and we are committed to that target - a mid-stream failure
+        can no longer fail over, it can only surface as an error.
+
+        So the machinery below concentrates all the retry/fallback logic into
+        _open_stream (which gets the first chunk in hand), and after that just
+        relays. This is the streaming analogue of "buffer until you can commit."
+        """
+        errors: list[ProviderError] = []
+
+        for index, target in enumerate(self._chain):
+            try:
+                first, remaining = await self._open_stream(target, request)
+            except ProviderError as error:
+                errors.append(error)
+                if not error.retryable:
+                    logger.error("non-retryable stream failure on %s: %s", target.label, error)
+                    raise
+                logger.warning(
+                    "stream open failed on %s (%s); falling over to next target",
+                    target.label,
+                    error,
+                )
+                continue
+
+            # Committed to this target: the client is about to see a token.
+            if index > 0:
+                logger.warning("stream served by fallback target %s", target.label)
+            yield first
+            async for chunk in remaining:  # a failure here can no longer fail over
+                yield chunk
+            return
+
+        raise AllProvidersFailedError(errors)
+
+    async def _open_stream(
+        self, target: Target, request: ChatRequest
+    ) -> tuple[StreamChunk, AsyncIterator[StreamChunk]]:
+        """Open a stream and pull its first chunk, retrying transient open-time
+        failures on the SAME target with backoff. Returns (first_chunk, rest).
+
+        Everything that can go wrong AND be recovered from must happen here,
+        while nothing has been emitted to the caller yet."""
+        for attempt in range(1, self._retry.max_attempts + 1):
+            agen = target.provider.stream(request, model=target.model)
+            try:
+                first = await agen.__anext__()
+                return first, agen
+            except StopAsyncIteration:
+                await agen.aclose()
+                raise ProviderError(
+                    "provider produced an empty stream",
+                    provider=target.provider.name,
+                    retryable=True,
+                    transient=False,
+                ) from None
+            except ProviderError as error:
+                await agen.aclose()
+                is_last = attempt == self._retry.max_attempts
+                if not error.transient or is_last:
+                    raise
+                delay = full_jitter_delay(attempt - 1, self._retry, self._rand)
+                logger.warning(
+                    "transient stream-open failure on %s (attempt %d/%d): %s; retrying in %.2fs",
+                    target.label,
+                    attempt,
+                    self._retry.max_attempts,
+                    error,
+                    delay,
+                )
+                await self._sleep(delay)
+
+        raise AssertionError("stream retry loop exited without returning or raising")
