@@ -40,11 +40,12 @@ def _request() -> ChatRequest:
 
 
 def _retryable(name: str) -> ProviderError:
+    # retryable but not transient -> fails over without wasting retries
     return ProviderError("rate limited", provider=name, retryable=True, status_code=429)
 
 
 def _fatal(name: str) -> ProviderError:
-    return ProviderError("bad request", provider=name, retryable=False, status_code=400)
+    return ProviderError("bad request", provider=name, retryable=False, status_code=405)
 
 
 @pytest.mark.asyncio
@@ -83,7 +84,7 @@ async def test_non_retryable_fails_fast_without_failover():
         await gw.complete(_request())
 
     assert primary.calls == 1
-    assert backup.calls == 0  # a malformed request must NOT be retried elsewhere
+    assert backup.calls == 0  # a fail-fast request must NOT be retried elsewhere
 
 
 @pytest.mark.asyncio

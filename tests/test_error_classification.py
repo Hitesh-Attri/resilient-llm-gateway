@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import pytest
 
-from core.provider import should_failover
+from core.provider import is_transient, should_failover
 
 CREDIT_MSG = "Your credit balance is too low to access the Anthropic API."
 MODEL_GONE = "This model models/gemini-2.5-flash is no longer available to new users."
@@ -45,10 +45,7 @@ def test_target_specific_failures_fail_over(status, message):
     assert should_failover(status, message) is True
 
 
-@pytest.mark.parametrize(
-    "status",
-    [405, 406, 414, 415],
-)
+@pytest.mark.parametrize("status", [405, 406, 414, 415])
 def test_intrinsically_broken_requests_fail_fast(status):
     # These break identically on every provider, so don't waste the chain.
     assert should_failover(status, "whatever") is False
@@ -57,3 +54,32 @@ def test_intrinsically_broken_requests_fail_fast(status):
 def test_default_is_fail_over_for_unlisted_4xx():
     # A 400 we've never seen defaults to failover - availability over strictness.
     assert should_failover(400, "some new error string we didn't anticipate") is True
+
+
+# ---- transience: should the SAME provider be retried? ----------------------
+
+@pytest.mark.parametrize(
+    "status,message",
+    [
+        (500, "boom"),
+        (503, "unavailable"),
+        (429, "rate limit exceeded"),   # real rate limit -> transient
+        (408, "timeout"),
+    ],
+)
+def test_temporary_conditions_are_transient(status, message):
+    assert is_transient(status, message) is True
+
+
+@pytest.mark.parametrize(
+    "status,message",
+    [
+        (429, "insufficient_quota"),    # no money -> not transient, don't retry
+        (429, "You exceeded your current quota, check billing"),
+        (400, CREDIT_MSG),
+        (404, MODEL_GONE),
+        (401, "invalid api key"),
+    ],
+)
+def test_permanent_conditions_are_not_transient(status, message):
+    assert is_transient(status, message) is False
