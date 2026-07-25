@@ -1,41 +1,54 @@
-# LLM Gateway (Module 1)
+# resilient-llm-gateway (Module 1)
 
-A from-scratch, provider-agnostic gateway that fronts OpenAI, Anthropic, and AWS
-Bedrock behind one interface, with an ordered fallback chain. This is the
+A from-scratch, provider-agnostic gateway that fronts OpenAI, Anthropic, AWS
+Bedrock, and any OpenAI-compatible endpoint (Groq, Gemini, Ollama) behind one
+interface, with per-target retries and an ordered fallback chain. This is the
 foundation every later module (RAG, agent, MCP server) makes its model calls
 through.
 
 ## The idea in one line
 
 Callers speak one normalized vocabulary (`ChatRequest` / `ChatResponse`).
-Adapters translate to each vendor. The gateway tries targets in order and fails
-over on transient errors, fails fast on bad requests.
+Adapters translate to each vendor. The gateway retries a target on transient
+errors, then falls over to the next target - failing fast only on requests no
+provider could serve.
 
 ## Layout
 
 ```
-llm-gateway/
-├── src/                     # import root (see "Imports" below)
+resilient-llm-gateway/
+├── src/                          # import root (see "Imports" below)
 │   ├── core/
-│   │   ├── types.py         # normalized request/response vocabulary
-│   │   ├── provider.py      # Provider Protocol + ProviderError(retryable=...)
-│   │   ├── gateway.py       # the fallback chain (the heart)
-│   │   └── config.py        # config-driven chain from LLM_CHAIN env
-│   ├── providers/           # one adapter per vendor (SDKs lazy-imported)
-│   │   ├── openai_provider.py
+│   │   ├── types.py              # normalized request/response vocabulary
+│   │   ├── provider.py           # Provider Protocol, ProviderError, classifiers
+│   │   │                         #   (should_failover / is_transient)
+│   │   ├── retry.py              # RetryPolicy + full-jitter backoff (pure)
+│   │   ├── gateway.py            # the two loops: retry (inner) + fallback (outer)
+│   │   ├── config.py             # config-driven chain + retry policy from env
+│   │   ├── log_context.py        # getter and setter for request id context var
+│   │   └── log.py                # get_logger(); logging setup lives here
+│   ├── providers/                # one adapter per vendor (SDKs lazy-imported)
+│   │   ├── openai_provider.py    # also serves Groq / Gemini / Ollama via base_url
 │   │   ├── anthropic_provider.py
 │   │   └── bedrock_provider.py
 │   ├── api/
-│   │   └── routes.py        # POST /v1/chat
-│   └── main.py              # FastAPI app + `python src/main.py` entrypoint
-├── tests/                   # fallback tests (no API keys needed)
-├── infra/                   # OpenTofu + Terragrunt (deployment slice, later)
-├── .github/workflows/ci.yml # lint + test on push/PR
+│   │   └── routes.py             # POST /v1/chat, GET /health
+│   └── main.py                   # FastAPI app + `python src/main.py` entrypoint
+├── tests/                        # no API keys needed (fake providers, injected clock)
+│   ├── test_gateway_fallback.py  # outer loop: fail-over vs fail-fast
+│   ├── test_error_classification.py  # should_failover / is_transient
+│   └── test_retry.py             # inner loop: backoff schedule + retry-then-failover
+├── infra/                        # OpenTofu + Terragrunt (deployment slice, later)
+│   └── README.md
+├── .github/workflows/ci.yml      # lint + test on push/PR
 ├── Dockerfile
-├── docker-compose.yml       # gateway + redis (redis staged for cache slice)
-├── pyproject.toml           # deps + makes src/ the import root
-├── requirements.txt         # runtime deps (for Docker layer caching)
-└── requirements-dev.txt
+├── docker-compose.yml            # gateway + redis (redis staged for cache slice)
+├── .dockerignore
+├── .gitignore
+├── .env.example                  # copy to .env; documents every setting
+├── pyproject.toml                # deps + makes src/ the import root + tool config
+├── requirements.txt              # runtime deps (for Docker layer caching)
+└── requirements-dev.txt          # runtime + pytest / ruff
 ```
 
 ## Imports
