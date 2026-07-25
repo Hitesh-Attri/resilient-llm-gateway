@@ -19,25 +19,31 @@ provider could serve.
 resilient-llm-gateway/
 ├── src/                          # import root (see "Imports" below)
 │   ├── core/
-│   │   ├── types.py              # normalized request/response vocabulary
+│   │   ├── types.py              # normalized vocabulary + StreamChunk
 │   │   ├── provider.py           # Provider Protocol, ProviderError, classifiers
 │   │   │                         #   (should_failover / is_transient)
 │   │   ├── retry.py              # RetryPolicy + full-jitter backoff (pure)
-│   │   ├── gateway.py            # the two loops: retry (inner) + fallback (outer)
+│   │   ├── gateway.py            # complete() + stream(); retry (inner) + fallback (outer)
 │   │   ├── config.py             # config-driven chain + retry policy from env
-│   │   ├── log_context.py        # getter and setter for request id context var
-│   │   └── log.py                # get_logger(); logging setup lives here
-│   ├── providers/                # one adapter per vendor (SDKs lazy-imported)
-│   │   ├── openai_provider.py    # also serves Groq / Gemini / Ollama via base_url
+│   │   ├── log.py                # get_logger(); logging setup lives here
+│   │   └── log_context.py        # request-id ContextVar (get/set across async)
+│   ├── providers/                # one class per provider; SDKs lazy-imported
+│   │   ├── openai_compatible.py  # base: shared OpenAI wire protocol
+│   │   ├── openai_provider.py    # }
+│   │   ├── groq_provider.py      # } thin subclasses: identity + capabilities +
+│   │   ├── gemini_provider.py    # } per-provider quirks (reasoning_effort hook)
+│   │   ├── ollama_provider.py    # }
 │   │   ├── anthropic_provider.py
 │   │   └── bedrock_provider.py
 │   ├── api/
-│   │   └── routes.py             # POST /v1/chat, GET /health
+│   │   └── routes.py             # POST /v1/chat (buffered), /v2/chat (SSE), GET /health
 │   └── main.py                   # FastAPI app + `python src/main.py` entrypoint
 ├── tests/                        # no API keys needed (fake providers, injected clock)
 │   ├── test_gateway_fallback.py  # outer loop: fail-over vs fail-fast
 │   ├── test_error_classification.py  # should_failover / is_transient
-│   └── test_retry.py             # inner loop: backoff schedule + retry-then-failover
+│   ├── test_retry.py             # inner loop: backoff schedule + retry-then-failover
+│   ├── test_streaming.py         # commit boundary: failover before token, not after
+│   └── test_providers.py         # provider identity/capabilities + config wiring
 ├── infra/                        # OpenTofu + Terragrunt (deployment slice, later)
 │   └── README.md
 ├── .github/workflows/ci.yml      # lint + test on push/PR
@@ -168,10 +174,46 @@ The `ProviderError.transient` flag drives the inner loop, `retryable` drives the
 outer one. A no-credits 429 is retryable-but-not-transient, so it fails over
 immediately instead of wasting backoff on a provider that can't recover.
 
+## Streaming (`POST /v2/chat`)
+
+Same request body as `/v1/chat`, but the response is a Server-Sent Events stream
+so tokens render live instead of waiting for the whole completion:
+
+```bash
+curl -N -s localhost:8000/v2/chat -H 'content-type: application/json' -d '{
+  "messages":[{"role":"user","content":"Explain a token bucket."}],
+  "system":"You are terse."
+}'
+```
+
+Events (`-N` disables curl buffering so you see them arrive):
+
+```
+data: {"type":"delta","content":"A token "}
+data: {"type":"delta","content":"bucket "}
+...
+data: {"type":"done","provider":"groq","model":"...","usage":{...},"latency_ms":812.4}
+```
+
+An abnormal end (e.g. all providers down, or a mid-stream drop) arrives as a
+final `{"type":"error","message":"..."}` event.
+
+**The commit boundary.** Retry and fallback can only happen *before the first
+token reaches the client* - once a delta is sent, the client has partial output
+and the stream is committed to that provider. So all recovery is concentrated in
+`gateway._open_stream` (get the first chunk in hand, retrying/failing over as
+needed); after that the gateway only relays, and a mid-stream failure surfaces as
+an `error` event rather than silently switching providers. `test_streaming.py`
+pins both halves of this.
+
+Usage during streaming is provider-dependent: OpenAI and Groq report it via a
+final usage chunk (`stream_usage=True`), Anthropic via the final message, Bedrock
+via a metadata event; Gemini's compat layer omits it, so `usage` may be zero
+there.
+
 ## Not built yet (next slices, in order)
 
-1. Streaming responses (SSE).
-2. Structured outputs (Pydantic schema -> provider tool/JSON mode).
-3. Redis semantic cache + provider prompt caching.
-4. Per-key token budgets + rate limiting.
-5. Tracing (Langfuse / OpenTelemetry) + eval suite.
+1. Structured outputs (Pydantic schema -> provider tool/JSON mode).
+2. Redis semantic cache + provider prompt caching.
+3. Per-key token budgets + rate limiting.
+4. Tracing (Langfuse / OpenTelemetry) + eval suite.

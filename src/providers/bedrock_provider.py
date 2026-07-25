@@ -23,7 +23,7 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 from core.provider import ProviderError
-from core.types import ChatRequest, ChatResponse, StreamChunk, Usage
+from core.types import ChatRequest, ChatResponse, StreamChunk, Usage, normalize_finish_reason
 
 # Bedrock signals failures with botocore error codes, not HTTP status, so it
 # classifies here rather than via core.provider.should_failover - but with the
@@ -106,6 +106,7 @@ class BedrockProvider:
             provider=self.name,
             usage=Usage(input_tokens=usage["inputTokens"], output_tokens=usage["outputTokens"]),
             latency_ms=latency_ms,
+            finish_reason=normalize_finish_reason(resp.get("stopReason")),
         )
 
     async def stream(self, request: ChatRequest, *, model: str) -> AsyncIterator[StreamChunk]:
@@ -135,6 +136,7 @@ class BedrockProvider:
 
         producer = asyncio.create_task(asyncio.to_thread(produce))
         usage = Usage()
+        finish_raw: str | None = None
         try:
             while True:
                 item = await queue.get()
@@ -147,6 +149,8 @@ class BedrockProvider:
                     piece = event["contentBlockDelta"]["delta"].get("text", "")
                     if piece:
                         yield StreamChunk(delta=piece)
+                elif "messageStop" in event:
+                    finish_raw = event["messageStop"].get("stopReason")
                 elif "metadata" in event:
                     u = event["metadata"].get("usage", {})
                     usage = Usage(
@@ -159,4 +163,5 @@ class BedrockProvider:
         yield StreamChunk(
             finished=True, provider=self.name, model=model, usage=usage,
             latency_ms=(time.perf_counter() - start) * 1000,
+            finish_reason=normalize_finish_reason(finish_raw),
         )
