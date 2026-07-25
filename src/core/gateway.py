@@ -20,13 +20,13 @@ from __future__ import annotations
 
 import asyncio
 import random
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 
+from core.log import get_logger
 from core.provider import Provider, ProviderError
 from core.retry import RetryPolicy, full_jitter_delay
-from core.types import ChatRequest, ChatResponse
-from core.log import get_logger
+from core.types import ChatRequest, ChatResponse, StreamChunk
 
 logger = get_logger(__name__)
 
@@ -123,4 +123,81 @@ class LLMGateway:
 
         # Unreachable: the loop either returns or raises on the last attempt.
         raise AssertionError("retry loop exited without returning or raising")
-    
+
+    async def stream(self, request: ChatRequest) -> AsyncIterator[StreamChunk]:
+        """Streaming counterpart to complete().
+
+        The critical difference: retry and fallback can ONLY happen before the
+        first token reaches the caller. Once we yield a delta, the client has
+        partial output and we are committed to that target - a mid-stream failure
+        can no longer fail over, it can only surface as an error.
+
+        So the machinery below concentrates all the retry/fallback logic into
+        _open_stream (which gets the first chunk in hand), and after that just
+        relays. This is the streaming analogue of "buffer until you can commit."
+        """
+        errors: list[ProviderError] = []
+
+        for index, target in enumerate(self._chain):
+            try:
+                first, remaining = await self._open_stream(target, request)
+            except ProviderError as error:
+                errors.append(error)
+                if not error.retryable:
+                    logger.error("non-retryable stream failure on %s: %s", target.label, error)
+                    raise
+                logger.warning(
+                    "stream open failed on %s (%s); falling over to next target",
+                    target.label,
+                    error,
+                )
+                continue
+
+            # Committed to this target: the client is about to see a token.
+            if index > 0:
+                logger.warning("stream served by fallback target %s", target.label)
+            yield first
+            async for chunk in remaining:  # a failure here can no longer fail over
+                yield chunk
+            return
+
+        raise AllProvidersFailedError(errors)
+
+    async def _open_stream(
+        self, target: Target, request: ChatRequest
+    ) -> tuple[StreamChunk, AsyncIterator[StreamChunk]]:
+        """Open a stream and pull its first chunk, retrying transient open-time
+        failures on the SAME target with backoff. Returns (first_chunk, rest).
+
+        Everything that can go wrong AND be recovered from must happen here,
+        while nothing has been emitted to the caller yet."""
+        for attempt in range(1, self._retry.max_attempts + 1):
+            agen = target.provider.stream(request, model=target.model)
+            try:
+                first = await agen.__anext__()
+                return first, agen
+            except StopAsyncIteration:
+                await agen.aclose()
+                raise ProviderError(
+                    "provider produced an empty stream",
+                    provider=target.provider.name,
+                    retryable=True,
+                    transient=False,
+                ) from None
+            except ProviderError as error:
+                await agen.aclose()
+                is_last = attempt == self._retry.max_attempts
+                if not error.transient or is_last:
+                    raise
+                delay = full_jitter_delay(attempt - 1, self._retry, self._rand)
+                logger.warning(
+                    "transient stream-open failure on %s (attempt %d/%d): %s; retrying in %.2fs",
+                    target.label,
+                    attempt,
+                    self._retry.max_attempts,
+                    error,
+                    delay,
+                )
+                await self._sleep(delay)
+
+        raise AssertionError("stream retry loop exited without returning or raising")

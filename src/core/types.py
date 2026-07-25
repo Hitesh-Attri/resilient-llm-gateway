@@ -51,3 +51,22 @@ class ChatResponse(BaseModel):
     provider: str
     usage: Usage
     latency_ms: float
+
+
+class StreamChunk(BaseModel):
+    """One item in a streamed response.
+
+    Two shapes flow through the same type:
+      - a text piece:   delta="Hello", finished=False
+      - the final event: finished=True, with provider/model/usage/latency filled in
+
+    Keeping both in one type lets a provider's stream be a single async iterator
+    the gateway can relay without special-casing, and the SSE layer maps each to
+    a `delta` or `done` event."""
+
+    delta: str = ""
+    finished: bool = False
+    provider: str | None = None
+    model: str | None = None
+    usage: Usage | None = None
+    latency_ms: float | None = None
