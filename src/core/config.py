@@ -16,6 +16,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from core.gateway import LLMGateway, Target
 from core.provider import Provider
+from core.retry import RetryPolicy
 
 
 class Settings(BaseSettings):
@@ -34,13 +35,10 @@ class Settings(BaseSettings):
     gemini_api_key: str | None = None
     ollama_base_url: str = "http://localhost:11434/v1"
 
-
-# Providers that speak OpenAI's wire format, so they reuse OpenAIProvider.
-# name -> (base_url, settings attribute holding the key)
-_OPENAI_COMPATIBLE = {
-    "groq": ("https://api.groq.com/openai/v1", "groq_api_key"),
-    "gemini": ("https://generativelanguage.googleapis.com/v1beta/openai/", "gemini_api_key"),
-}
+    # Retry policy for the inner loop (per-target, on transient failures).
+    retry_max_attempts: int = 3     # 1 initial try + 2 retries
+    retry_base_delay: float = 0.5   # seconds
+    retry_max_delay: float = 8.0    # cap per backoff sleep
 
 
 @lru_cache
@@ -48,38 +46,43 @@ def get_settings() -> Settings:
     return Settings()
 
 
+def _require(value: str | None, name: str, key_env: str) -> str:
+    if not value:
+        raise ValueError(f"{name} in chain but {key_env} is not set")
+    return value
+
+
 def _construct_provider(name: str, settings: Settings) -> Provider:
     """Build a provider by name. SDK imports live inside the adapter modules and
     are only triggered here, so the core package stays importable without any
-    vendor SDK installed."""
+    vendor SDK installed. Each provider is its own class, configured individually."""
     if name == "openai":
         from providers.openai_provider import OpenAIProvider
 
-        if not settings.openai_api_key:
-            raise ValueError("openai in chain but OPENAI_API_KEY is not set")
-        return OpenAIProvider(api_key=settings.openai_api_key)
+        return OpenAIProvider(api_key=_require(settings.openai_api_key, name, "OPENAI_API_KEY"))
+
+    if name == "groq":
+        from providers.groq_provider import GroqProvider
+
+        return GroqProvider(api_key=_require(settings.groq_api_key, name, "GROQ_API_KEY"))
+
+    if name == "gemini":
+        from providers.gemini_provider import GeminiProvider
+
+        return GeminiProvider(api_key=_require(settings.gemini_api_key, name, "GEMINI_API_KEY"))
+
+    if name == "ollama":
+        from providers.ollama_provider import OllamaProvider
+
+        # Local models: no key needed, but the SDK requires a non-empty string.
+        return OllamaProvider(api_key="ollama", base_url=settings.ollama_base_url)
 
     if name == "anthropic":
         from providers.anthropic_provider import AnthropicProvider
 
-        if not settings.anthropic_api_key:
-            raise ValueError("anthropic in chain but ANTHROPIC_API_KEY is not set")
-        return AnthropicProvider(api_key=settings.anthropic_api_key)
-
-    if name in _OPENAI_COMPATIBLE:
-        from providers.openai_provider import OpenAIProvider
-
-        base_url, key_attr = _OPENAI_COMPATIBLE[name]
-        api_key = getattr(settings, key_attr)
-        if not api_key:
-            raise ValueError(f"{name} in chain but {key_attr.upper()} is not set")
-        return OpenAIProvider(api_key=api_key, base_url=base_url, name=name)
-
-    if name == "ollama":
-        # Local models: no key needed, but the SDK requires a non-empty string.
-        from providers.openai_provider import OpenAIProvider
-
-        return OpenAIProvider(api_key="ollama", base_url=settings.ollama_base_url, name="ollama")
+        return AnthropicProvider(
+            api_key=_require(settings.anthropic_api_key, name, "ANTHROPIC_API_KEY")
+        )
 
     if name == "bedrock":
         from providers.bedrock_provider import BedrockProvider
@@ -103,4 +106,9 @@ def build_gateway(settings: Settings | None = None) -> LLMGateway:
             cache[name] = _construct_provider(name, settings)
         targets.append(Target(provider=cache[name], model=model))
 
-    return LLMGateway(targets)
+    policy = RetryPolicy(
+        max_attempts=settings.retry_max_attempts,
+        base_delay=settings.retry_base_delay,
+        max_delay=settings.retry_max_delay,
+    )
+    return LLMGateway(targets, retry=policy)
