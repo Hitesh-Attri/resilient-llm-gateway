@@ -28,7 +28,7 @@ class Settings(BaseSettings):
 
     openai_api_key: str | None = None
     anthropic_api_key: str | None = None
-    aws_region: str = "us-east-1"
+    aws_region: str = "ap-south-1"
 
     # OpenAI-compatible providers (free tiers - useful for learning and as
     # genuine fallback lanes).
