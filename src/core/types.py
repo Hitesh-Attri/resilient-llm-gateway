@@ -8,6 +8,7 @@ vocabulary. Nothing here knows about OpenAI, Anthropic, or Bedrock.
 from __future__ import annotations
 
 from enum import Enum
+from typing import Any
 
 from pydantic import BaseModel, Field
 
@@ -22,6 +23,18 @@ class Message(BaseModel):
     content: str
 
 
+class ReasoningEffort(str, Enum):
+    """How hard a reasoning-capable model should think before answering. Maps to
+    OpenAI's `reasoning_effort` and, via Google's compat layer, to Gemini's
+    `thinking_level`. Lower effort = fewer thinking tokens = less chance of the
+    thinking budget eating your whole max_tokens and truncating the answer."""
+
+    minimal = "minimal"
+    low = "low"
+    medium = "medium"
+    high = "high"
+
+
 class ChatRequest(BaseModel):
     """What a caller sends. Note `system` is separate from `messages`.
 
@@ -33,8 +46,18 @@ class ChatRequest(BaseModel):
 
     messages: list[Message] = Field(min_length=1)
     system: str | None = None
-    max_tokens: int = Field(default=1024, ge=1, le=8192)
+    # 4096 default: generous enough not to truncate thorough answers, yet safe
+    # across every provider (Anthropic requires max_tokens and older Claude models
+    # cap output at 4096). Cap at 32768 as an abuse guard - a per-model-aware or
+    # configurable cap belongs with the rate-limiting/budgets slice, not here.
+    max_tokens: int = Field(default=4096, ge=1, le=32768)
     temperature: float = Field(default=0.7, ge=0.0, le=2.0)
+    # Optional per-request override. When None, a reasoning-capable provider uses
+    # its configured default; non-reasoning providers ignore it entirely.
+    reasoning_effort: ReasoningEffort | None = None
+    # A JSON Schema. When set, the gateway asks the provider for conforming JSON,
+    # validates it server-side, and fails over if the model violates the schema.
+    response_schema: dict[str, Any] | None = None
 
 
 class Usage(BaseModel):
@@ -93,6 +116,9 @@ class ChatResponse(BaseModel):
     usage: Usage
     latency_ms: float
     finish_reason: FinishReason | None = None
+    # Populated only when the request set response_schema and validation passed:
+    # the response content parsed into a dict, so callers don't re-parse.
+    parsed: dict[str, Any] | None = None
 
 
 class StreamChunk(BaseModel):

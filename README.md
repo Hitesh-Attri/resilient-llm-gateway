@@ -19,11 +19,12 @@ provider could serve.
 resilient-llm-gateway/
 ├── src/                          # import root (see "Imports" below)
 │   ├── core/
-│   │   ├── types.py              # normalized vocabulary + StreamChunk
+│   │   ├── types.py              # normalized vocabulary + StreamChunk + enums
 │   │   ├── provider.py           # Provider Protocol, ProviderError, classifiers
 │   │   │                         #   (should_failover / is_transient)
 │   │   ├── retry.py              # RetryPolicy + full-jitter backoff (pure)
-│   │   ├── gateway.py            # complete() + stream(); retry (inner) + fallback (outer)
+│   │   ├── structured.py         # JSON-schema validation for structured output
+│   │   ├── gateway.py            # complete() + stream(); retry + fallback + validate
 │   │   ├── config.py             # config-driven chain + retry policy from env
 │   │   ├── log.py                # get_logger(); logging setup lives here
 │   │   └── log_context.py        # request-id ContextVar (get/set across async)
@@ -31,10 +32,10 @@ resilient-llm-gateway/
 │   │   ├── openai_compatible.py  # base: shared OpenAI wire protocol
 │   │   ├── openai_provider.py    # }
 │   │   ├── groq_provider.py      # } thin subclasses: identity + capabilities +
-│   │   ├── gemini_provider.py    # } per-provider quirks (reasoning_effort hook)
+│   │   ├── gemini_provider.py    # } per-provider quirks (reasoning_effort, etc.)
 │   │   ├── ollama_provider.py    # }
-│   │   ├── anthropic_provider.py
-│   │   └── bedrock_provider.py
+│   │   ├── anthropic_provider.py # forced tool-use for structured output
+│   │   └── bedrock_provider.py   # forced tool-use + sync->async stream bridge
 │   ├── api/
 │   │   └── routes.py             # POST /v1/chat (buffered), /v2/chat (SSE), GET /health
 │   └── main.py                   # FastAPI app + `python src/main.py` entrypoint
@@ -43,7 +44,11 @@ resilient-llm-gateway/
 │   ├── test_error_classification.py  # should_failover / is_transient
 │   ├── test_retry.py             # inner loop: backoff schedule + retry-then-failover
 │   ├── test_streaming.py         # commit boundary: failover before token, not after
-│   └── test_providers.py         # provider identity/capabilities + config wiring
+│   ├── test_providers.py         # provider identity/capabilities + config wiring
+│   ├── test_finish_reason.py     # stop-reason normalization across providers
+│   ├── test_reasoning_effort.py  # reasoning_effort resolution + capability gating
+│   ├── test_request_validation.py    # ChatRequest bounds/defaults contract
+│   └── test_structured_output.py # schema validation + failover on violation
 ├── infra/                        # OpenTofu + Terragrunt (deployment slice, later)
 │   └── README.md
 ├── .github/workflows/ci.yml      # lint + test on push/PR
@@ -67,6 +72,29 @@ relative `..` hops. `src/` is put on the path three ways depending on context:
 - **Tests:** `pythonpath = ["src"]` in pyproject, so no install needed.
 - **Docker / direct run:** `PYTHONPATH=/app/src`, and running `python src/main.py`
   adds `src/` automatically (Python puts the script's own dir on the path).
+
+## Dependencies
+
+`pyproject.toml` is the source of truth (loose ranges: "what this app is
+compatible with"). `requirements.txt` / `requirements-dev.txt` are *generated*
+pinned lockfiles for reproducible Docker builds - don't hand-edit them, regenerate.
+
+Add or change a dependency: edit `pyproject.toml`, then regenerate the lockfiles.
+Two toolchains:
+
+```bash
+# uv (recommended in 2026 - fast; uv.lock is the real lockfile, commit it)
+uv add httpx                     # edits pyproject + updates uv.lock
+uv export --no-hashes --no-emit-project -o requirements.txt
+uv export --extra dev --no-hashes --no-emit-project -o requirements-dev.txt
+
+# or pip-tools (pip-native)
+pip install pip-tools
+pip-compile pyproject.toml -o requirements.txt
+pip-compile --extra dev pyproject.toml -o requirements-dev.txt
+```
+
+Then commit `pyproject.toml` and both regenerated files together.
 
 ## Run it
 
@@ -211,9 +239,125 @@ final usage chunk (`stream_usage=True`), Anthropic via the final message, Bedroc
 via a metadata event; Gemini's compat layer omits it, so `usage` may be zero
 there.
 
+## Structured output
+
+Send a JSON Schema as `response_schema` and the gateway makes the model return
+conforming JSON, validates it, and hands you a parsed object:
+
+```bash
+curl -s localhost:8000/v1/chat -H 'content-type: application/json' -d '{
+  "messages":[{"role":"user","content":"Classify the sentiment of: I love this."}],
+  "response_schema":{
+    "type":"object",
+    "properties":{"label":{"type":"string"},"score":{"type":"number"}},
+    "required":["label","score"],
+    "additionalProperties":false
+  }
+}' | jq '{content, parsed}'
+```
+
+`content` holds the raw JSON string; `parsed` is the validated object.
+
+Schemas nest - use `$defs` for reused shapes, `enum` to constrain values, and
+`array` for lists. This extracts structured data from a support ticket:
+
+```bash
+curl -s localhost:8000/v1/chat -H 'content-type: application/json' -d '{
+  "messages":[{"role":"user","content":"Extract details from: My order #A-91 never arrived and support was rude. Refund me."}],
+  "response_schema":{
+    "type":"object",
+    "properties":{
+      "ticket":{
+        "type":"object",
+        "properties":{
+          "order_id":{"type":"string"},
+          "priority":{"type":"string","enum":["low","medium","high"]},
+          "sentiment":{"type":"string","enum":["positive","neutral","negative"]}
+        },
+        "required":["order_id","priority","sentiment"],
+        "additionalProperties":false
+      },
+      "issues":{
+        "type":"array",
+        "items":{
+          "type":"object",
+          "properties":{
+            "category":{"type":"string","enum":["delivery","billing","support","product"]},
+            "detail":{"type":"string"}
+          },
+          "required":["category","detail"],
+          "additionalProperties":false
+        }
+      },
+      "requested_action":{"type":"string"}
+    },
+    "required":["ticket","issues","requested_action"],
+    "additionalProperties":false
+  }
+}' | jq .parsed
+```
+
+Returns a nested object like:
+
+```json
+{
+  "ticket": {"order_id": "A-91", "priority": "high", "sentiment": "negative"},
+  "issues": [
+    {"category": "delivery", "detail": "order never arrived"},
+    {"category": "support", "detail": "support was rude"}
+  ],
+  "requested_action": "refund"
+}
+```
+
+Sample response:
+
+```json
+{
+  "content": "{\"ticket\":{\"order_id\":\"A-91\",\"priority\":\"high\",\"sentiment\":\"negative\"},\"issues\":[{\"category\":\"delivery\",\"detail\":\"order never arrived\"},{\"category\":\"support\",\"detail\":\"support was rude\"}],\"requested_action\":\"refund\"}",
+  "model": "gemini-3.6-flash",
+  "provider": "gemini",
+  "usage": {
+    "input_tokens": 22,
+    "output_tokens": 50
+  },
+  "latency_ms": 4722.132100003364,
+  "finish_reason": "stop",
+  "parsed": {
+    "ticket": {
+      "order_id": "A-91",
+      "priority": "high",
+      "sentiment": "negative"
+    },
+    "issues": [
+      {
+        "category": "delivery",
+        "detail": "order never arrived"
+      },
+      {
+        "category": "support",
+        "detail": "support was rude"
+      }
+    ],
+    "requested_action": "refund"
+  }
+}
+```
+
+How it works: the OpenAI family uses `response_format`, while Anthropic and
+Bedrock (which have no such field) use *forced tool-use* - one tool whose input
+schema is yours, forced via `tool_choice`, with the call's arguments as your
+object. The adapters hide that difference.
+
+**Validation is the guarantee.** Provider "strict" modes vary and some compat
+layers ignore them, so the gateway validates the result against your schema
+itself. A violation is treated like any other failed attempt - it **fails over
+to the next provider**, because a different model may honor the contract. This is
+a non-streaming feature (you want the whole validated object); streaming passes
+the schema through where supported but isn't validated.
+
 ## Not built yet (next slices, in order)
 
-1. Structured outputs (Pydantic schema -> provider tool/JSON mode).
-2. Redis semantic cache + provider prompt caching.
-3. Per-key token budgets + rate limiting.
-4. Tracing (Langfuse / OpenTelemetry) + eval suite.
+1. Redis semantic cache + provider prompt caching.
+2. Per-key token budgets + rate limiting.
+3. Tracing (Langfuse / OpenTelemetry) + eval suite.

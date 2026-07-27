@@ -18,6 +18,7 @@ Auth is your standard AWS credential chain (IAM role on ECS) - no API key here.
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from collections.abc import AsyncIterator
 from typing import Any
@@ -70,6 +71,21 @@ class BedrockProvider:
         }
         if request.system:
             kwargs["system"] = [{"text": request.system}]
+        if request.response_schema is not None:
+            # Bedrock Converse structured output: one tool whose input schema is
+            # ours, forced via toolChoice. The toolUse block's input is our object.
+            kwargs["toolConfig"] = {
+                "tools": [
+                    {
+                        "toolSpec": {
+                            "name": "respond",
+                            "description": "Respond with the required structured data.",
+                            "inputSchema": {"json": request.response_schema},
+                        }
+                    }
+                ],
+                "toolChoice": {"tool": {"name": "respond"}},
+            }
         return kwargs
 
     def _map_error(self, e: Exception) -> ProviderError:
@@ -98,10 +114,15 @@ class BedrockProvider:
             raise self._map_error(e) from e
         latency_ms = (time.perf_counter() - start) * 1000
 
-        text = resp["output"]["message"]["content"][0]["text"]
+        blocks = resp["output"]["message"]["content"]
+        if request.response_schema is not None:
+            tool_use = next(b for b in blocks if "toolUse" in b)
+            content = json.dumps(tool_use["toolUse"]["input"])
+        else:
+            content = blocks[0]["text"]
         usage = resp["usage"]
         return ChatResponse(
-            content=text,
+            content=content,
             model=model,
             provider=self.name,
             usage=Usage(input_tokens=usage["inputTokens"], output_tokens=usage["outputTokens"]),

@@ -12,6 +12,7 @@ dependencies = [
     "uvicorn[standard]>=0.32",
     "pydantic>=2.9",
     "pydantic-settings>=2.6",
+    "jsonschema>=4.23",
     # Provider SDKs are lazy-imported, but a deployed container needs them present:
     "openai>=1.55",
     "anthropic>=0.40",

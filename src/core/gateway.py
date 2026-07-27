@@ -26,6 +26,7 @@ from dataclasses import dataclass
 from core.log import get_logger
 from core.provider import Provider, ProviderError
 from core.retry import RetryPolicy, full_jitter_delay
+from core.structured import StructuredOutputError, validate_json
 from core.types import ChatRequest, ChatResponse, StreamChunk
 
 logger = get_logger(__name__)
@@ -91,6 +92,24 @@ class LLMGateway:
                     error,
                 )
                 continue
+
+            # Structured output: validate against the schema. A violation means
+            # this model didn't honor the contract, so fail over to the next one -
+            # a different model may. Validation is our conformance guarantee.
+            if request.response_schema is not None:
+                try:
+                    parsed = validate_json(response.content, request.response_schema)
+                except StructuredOutputError as e:
+                    errors.append(
+                        ProviderError(str(e), provider=target.provider.name, retryable=True)
+                    )
+                    logger.warning(
+                        "structured output from %s failed validation (%s); falling over",
+                        target.label,
+                        e,
+                    )
+                    continue
+                response = response.model_copy(update={"parsed": parsed})
 
             if index > 0:
                 logger.warning("request served by fallback target %s", target.label)

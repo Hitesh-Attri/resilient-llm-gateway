@@ -55,9 +55,18 @@ def test_all_share_the_wire_protocol_base():
     ],
 )
 def test_missing_key_fails_fast_with_helpful_message(name, key_env):
-    # The key check runs before any client is constructed, so this needs no SDK.
+    # Construct Settings with every provider key explicitly None, so the test
+    # controls the input directly instead of depending on whether a .env or a
+    # real environment variable happens to be present.
+    settings = Settings(
+        _env_file=None,
+        openai_api_key=None,
+        anthropic_api_key=None,
+        groq_api_key=None,
+        gemini_api_key=None,
+    )
     with pytest.raises(ValueError, match=key_env):
-        _construct_provider(name, Settings(_env_file=None))
+        _construct_provider(name, settings)
 
 
 def test_unknown_provider_name_rejected():

@@ -17,6 +17,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from core.gateway import LLMGateway, Target
 from core.provider import Provider
 from core.retry import RetryPolicy
+from core.types import ReasoningEffort
 
 
 class Settings(BaseSettings):
@@ -27,13 +28,18 @@ class Settings(BaseSettings):
 
     openai_api_key: str | None = None
     anthropic_api_key: str | None = None
-    aws_region: str = "ap-south-1"
+    aws_region: str = "us-east-1"
 
     # OpenAI-compatible providers (free tiers - useful for learning and as
     # genuine fallback lanes).
     groq_api_key: str | None = None
     gemini_api_key: str | None = None
     ollama_base_url: str = "http://localhost:11434/v1"
+
+    # Per-provider reasoning default. Gemini 3.x defaults to heavy thinking that
+    # can truncate output, so we default this to `low`; override via env or set
+    # per request. None = don't send it (let the model decide).
+    gemini_reasoning_effort: ReasoningEffort | None = ReasoningEffort.low
 
     # Retry policy for the inner loop (per-target, on transient failures).
     retry_max_attempts: int = 3     # 1 initial try + 2 retries
@@ -69,7 +75,10 @@ def _construct_provider(name: str, settings: Settings) -> Provider:
     if name == "gemini":
         from providers.gemini_provider import GeminiProvider
 
-        return GeminiProvider(api_key=_require(settings.gemini_api_key, name, "GEMINI_API_KEY"))
+        return GeminiProvider(
+            api_key=_require(settings.gemini_api_key, name, "GEMINI_API_KEY"),
+            default_reasoning_effort=settings.gemini_reasoning_effort,
+        )
 
     if name == "ollama":
         from providers.ollama_provider import OllamaProvider

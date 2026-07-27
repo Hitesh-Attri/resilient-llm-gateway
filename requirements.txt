@@ -17,6 +17,10 @@ anyio==4.14.2
     #   openai
     #   starlette
     #   watchfiles
+attrs==26.1.0
+    # via
+    #   jsonschema
+    #   referencing
 boto3==1.43.52
     # via resilient-llm-gateway (pyproject.toml)
 botocore==1.43.52
@@ -65,6 +69,10 @@ jmespath==1.1.0
     # via
     #   boto3
     #   botocore
+jsonschema==4.26.0
+    # via resilient-llm-gateway (pyproject.toml)
+jsonschema-specifications==2025.9.1
+    # via jsonschema
 openai==2.46.0
     # via resilient-llm-gateway (pyproject.toml)
 pydantic==2.13.4
@@ -86,6 +94,14 @@ python-dotenv==1.2.2
     #   uvicorn
 pyyaml==6.0.3
     # via uvicorn
+referencing==0.37.0
+    # via
+    #   jsonschema
+    #   jsonschema-specifications
+rpds-py==2026.6.3
+    # via
+    #   jsonschema
+    #   referencing
 s3transfer==0.19.1
     # via boto3
 six==1.17.0
