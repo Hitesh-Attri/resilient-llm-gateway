@@ -90,8 +90,6 @@ uv export --extra dev --no-hashes --no-emit-project -o requirements-dev.txt
 
 # or pip-tools (pip-native)
 pip install pip-tools
-pip install -e "."
-pip install -e ".[dev]"
 pip-compile pyproject.toml -o requirements.txt
 pip-compile --extra dev pyproject.toml -o requirements-dev.txt
 ```
@@ -259,6 +257,92 @@ curl -s localhost:8000/v1/chat -H 'content-type: application/json' -d '{
 ```
 
 `content` holds the raw JSON string; `parsed` is the validated object.
+
+Schemas nest - use `$defs` for reused shapes, `enum` to constrain values, and
+`array` for lists. This extracts structured data from a support ticket:
+
+```bash
+curl -s localhost:8000/v1/chat -H 'content-type: application/json' -d '{
+  "messages":[{"role":"user","content":"Extract details from: My order #A-91 never arrived and support was rude. Refund me."}],
+  "response_schema":{
+    "type":"object",
+    "properties":{
+      "ticket":{
+        "type":"object",
+        "properties":{
+          "order_id":{"type":"string"},
+          "priority":{"type":"string","enum":["low","medium","high"]},
+          "sentiment":{"type":"string","enum":["positive","neutral","negative"]}
+        },
+        "required":["order_id","priority","sentiment"],
+        "additionalProperties":false
+      },
+      "issues":{
+        "type":"array",
+        "items":{
+          "type":"object",
+          "properties":{
+            "category":{"type":"string","enum":["delivery","billing","support","product"]},
+            "detail":{"type":"string"}
+          },
+          "required":["category","detail"],
+          "additionalProperties":false
+        }
+      },
+      "requested_action":{"type":"string"}
+    },
+    "required":["ticket","issues","requested_action"],
+    "additionalProperties":false
+  }
+}' | jq .parsed
+```
+
+Returns a nested object like:
+
+```json
+{
+  "ticket": {"order_id": "A-91", "priority": "high", "sentiment": "negative"},
+  "issues": [
+    {"category": "delivery", "detail": "order never arrived"},
+    {"category": "support", "detail": "support was rude"}
+  ],
+  "requested_action": "refund"
+}
+```
+
+Sample response:
+
+```json
+{
+  "content": "{\"ticket\":{\"order_id\":\"A-91\",\"priority\":\"high\",\"sentiment\":\"negative\"},\"issues\":[{\"category\":\"delivery\",\"detail\":\"order never arrived\"},{\"category\":\"support\",\"detail\":\"support was rude\"}],\"requested_action\":\"refund\"}",
+  "model": "gemini-3.6-flash",
+  "provider": "gemini",
+  "usage": {
+    "input_tokens": 22,
+    "output_tokens": 50
+  },
+  "latency_ms": 4722.132100003364,
+  "finish_reason": "stop",
+  "parsed": {
+    "ticket": {
+      "order_id": "A-91",
+      "priority": "high",
+      "sentiment": "negative"
+    },
+    "issues": [
+      {
+        "category": "delivery",
+        "detail": "order never arrived"
+      },
+      {
+        "category": "support",
+        "detail": "support was rude"
+      }
+    ],
+    "requested_action": "refund"
+  }
+}
+```
 
 How it works: the OpenAI family uses `response_format`, while Anthropic and
 Bedrock (which have no such field) use *forced tool-use* - one tool whose input
