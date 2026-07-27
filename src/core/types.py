@@ -45,7 +45,11 @@ class ChatRequest(BaseModel):
 
     messages: list[Message] = Field(min_length=1)
     system: str | None = None
-    max_tokens: int = Field(default=1024, ge=1, le=8192)
+    # 4096 default: generous enough not to truncate thorough answers, yet safe
+    # across every provider (Anthropic requires max_tokens and older Claude models
+    # cap output at 4096). Cap at 32768 as an abuse guard - a per-model-aware or
+    # configurable cap belongs with the rate-limiting/budgets slice, not here.
+    max_tokens: int = Field(default=4096, ge=1, le=32768)
     temperature: float = Field(default=0.7, ge=0.0, le=2.0)
     # Optional per-request override. When None, a reasoning-capable provider uses
     # its configured default; non-reasoning providers ignore it entirely.
