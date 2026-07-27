@@ -19,7 +19,34 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 from core.provider import ProviderError, is_transient, should_failover
-from core.types import ChatRequest, ChatResponse, StreamChunk, Usage, normalize_finish_reason
+from core.types import (
+    ChatRequest,
+    ChatResponse,
+    ReasoningEffort,
+    StreamChunk,
+    Usage,
+    normalize_finish_reason,
+)
+
+
+def resolve_reasoning_kwargs(
+    supports: bool,
+    request_effort: ReasoningEffort | None,
+    default_effort: ReasoningEffort | None,
+) -> dict[str, Any]:
+    """Pure decision for whether/what reasoning_effort to send.
+
+    - non-reasoning provider          -> {} (never send it; would error)
+    - request specifies effort         -> that value wins
+    - request unset, provider has default -> the default
+    - neither                          -> {} (let the model decide)
+
+    Kept as a free function so it's unit-testable without constructing a client.
+    """
+    if not supports:
+        return {}
+    effort = request_effort or default_effort
+    return {"reasoning_effort": effort.value} if effort is not None else {}
 
 
 class OpenAICompatibleProvider:
@@ -27,8 +54,19 @@ class OpenAICompatibleProvider:
     name: str = "openai"
     default_base_url: str | None = None
     supports_stream_usage: bool = False
+    # Whether this provider accepts reasoning_effort at all. Off by default
+    # because sending it to a non-reasoning model (e.g. Llama on Groq) errors.
+    supports_reasoning_effort: bool = False
+    # Built-in fallback default; config can override per instance via __init__.
+    default_reasoning_effort: ReasoningEffort | None = None
 
-    def __init__(self, api_key: str, *, base_url: str | None = None) -> None:
+    def __init__(
+        self,
+        api_key: str,
+        *,
+        base_url: str | None = None,
+        default_reasoning_effort: ReasoningEffort | None = None,
+    ) -> None:
         from openai import AsyncOpenAI  # lazy import: only if this family is used
 
         # max_retries=0: the SDK retries any 429 by default, including
@@ -39,12 +77,19 @@ class OpenAICompatibleProvider:
             base_url=base_url or self.default_base_url,
             max_retries=0,
         )
+        # A config-provided default overrides the class-level one.
+        if default_reasoning_effort is not None:
+            self.default_reasoning_effort = default_reasoning_effort
 
     # --- hooks for subclasses ---
     def _extra_create_kwargs(self, request: ChatRequest) -> dict[str, Any]:
-        """Provider-specific params merged into every create() call. Empty by
-        default; e.g. GeminiProvider will return {"reasoning_effort": ...}."""
-        return {}
+        """Provider-specific params merged into every create() call. Handles
+        reasoning_effort here (gated by capability); subclasses can extend."""
+        return resolve_reasoning_kwargs(
+            self.supports_reasoning_effort,
+            request.reasoning_effort,
+            self.default_reasoning_effort,
+        )
 
     # --- shared machinery ---
     def _build_messages(self, request: ChatRequest) -> list[dict[str, str]]:

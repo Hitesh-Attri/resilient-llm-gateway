@@ -22,6 +22,18 @@ class Message(BaseModel):
     content: str
 
 
+class ReasoningEffort(str, Enum):
+    """How hard a reasoning-capable model should think before answering. Maps to
+    OpenAI's `reasoning_effort` and, via Google's compat layer, to Gemini's
+    `thinking_level`. Lower effort = fewer thinking tokens = less chance of the
+    thinking budget eating your whole max_tokens and truncating the answer."""
+
+    minimal = "minimal"
+    low = "low"
+    medium = "medium"
+    high = "high"
+
+
 class ChatRequest(BaseModel):
     """What a caller sends. Note `system` is separate from `messages`.
 
@@ -35,6 +47,9 @@ class ChatRequest(BaseModel):
     system: str | None = None
     max_tokens: int = Field(default=1024, ge=1, le=8192)
     temperature: float = Field(default=0.7, ge=0.0, le=2.0)
+    # Optional per-request override. When None, a reasoning-capable provider uses
+    # its configured default; non-reasoning providers ignore it entirely.
+    reasoning_effort: ReasoningEffort | None = None
 
 
 class Usage(BaseModel):
