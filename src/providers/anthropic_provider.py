@@ -9,6 +9,7 @@ Anthropic's shape:
 
 from __future__ import annotations
 
+import json
 import time
 from collections.abc import AsyncIterator
 from typing import Any
@@ -55,6 +56,18 @@ class AnthropicProvider:
         }
         if request.system:
             kwargs["system"] = request.system
+        if request.response_schema is not None:
+            # Anthropic has no response_format; structured output is done by
+            # defining one tool whose input schema is ours and forcing its use.
+            # The model's "arguments" for that tool are our JSON object.
+            kwargs["tools"] = [
+                {
+                    "name": "respond",
+                    "description": "Respond with the required structured data.",
+                    "input_schema": request.response_schema,
+                }
+            ]
+            kwargs["tool_choice"] = {"type": "tool", "name": "respond"}
         return kwargs
 
     async def complete(self, request: ChatRequest, *, model: str) -> ChatResponse:
@@ -67,9 +80,15 @@ class AnthropicProvider:
             raise self._map_error(e) from e
         latency_ms = (time.perf_counter() - start) * 1000
 
-        text = "".join(block.text for block in resp.content if block.type == "text")
+        if request.response_schema is not None:
+            # The forced tool call carries our object in its `input`.
+            tool_use = next(b for b in resp.content if b.type == "tool_use")
+            content = json.dumps(tool_use.input)
+        else:
+            content = "".join(block.text for block in resp.content if block.type == "text")
+
         return ChatResponse(
-            content=text,
+            content=content,
             model=model,
             provider=self.name,
             usage=Usage(input_tokens=resp.usage.input_tokens, output_tokens=resp.usage.output_tokens),

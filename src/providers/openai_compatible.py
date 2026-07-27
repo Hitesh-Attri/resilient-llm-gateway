@@ -84,12 +84,21 @@ class OpenAICompatibleProvider:
     # --- hooks for subclasses ---
     def _extra_create_kwargs(self, request: ChatRequest) -> dict[str, Any]:
         """Provider-specific params merged into every create() call. Handles
-        reasoning_effort here (gated by capability); subclasses can extend."""
-        return resolve_reasoning_kwargs(
+        reasoning_effort (gated by capability) and structured output; subclasses
+        can extend."""
+        kwargs = resolve_reasoning_kwargs(
             self.supports_reasoning_effort,
             request.reasoning_effort,
             self.default_reasoning_effort,
         )
+        if request.response_schema is not None:
+            # OpenAI-family structured output. We don't set strict=true: providers
+            # vary in honoring it, and the gateway validates server-side anyway.
+            kwargs["response_format"] = {
+                "type": "json_schema",
+                "json_schema": {"name": "response", "schema": request.response_schema},
+            }
+        return kwargs
 
     # --- shared machinery ---
     def _build_messages(self, request: ChatRequest) -> list[dict[str, str]]:

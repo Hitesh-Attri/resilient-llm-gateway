@@ -8,6 +8,7 @@ vocabulary. Nothing here knows about OpenAI, Anthropic, or Bedrock.
 from __future__ import annotations
 
 from enum import Enum
+from typing import Any
 
 from pydantic import BaseModel, Field
 
@@ -54,6 +55,9 @@ class ChatRequest(BaseModel):
     # Optional per-request override. When None, a reasoning-capable provider uses
     # its configured default; non-reasoning providers ignore it entirely.
     reasoning_effort: ReasoningEffort | None = None
+    # A JSON Schema. When set, the gateway asks the provider for conforming JSON,
+    # validates it server-side, and fails over if the model violates the schema.
+    response_schema: dict[str, Any] | None = None
 
 
 class Usage(BaseModel):
@@ -112,6 +116,9 @@ class ChatResponse(BaseModel):
     usage: Usage
     latency_ms: float
     finish_reason: FinishReason | None = None
+    # Populated only when the request set response_schema and validation passed:
+    # the response content parsed into a dict, so callers don't re-parse.
+    parsed: dict[str, Any] | None = None
 
 
 class StreamChunk(BaseModel):
