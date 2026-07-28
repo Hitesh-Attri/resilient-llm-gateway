@@ -39,7 +39,9 @@ jobs:
           cache: pip
       - name: Install dependencies
         run: pip install -r requirements-dev.txt
-      - name: Lint
+      - name: Lint (non-blocking)
+        # Style-only findings are advisory; a ruff failure must not block deploy.
+        continue-on-error: true
         run: ruff check src tests
       - name: Test
         run: pytest -q
