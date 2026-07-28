@@ -12,7 +12,7 @@
       "image": "234189401925.dkr.ecr.ap-south-1.amazonaws.com/nexus/resilient-llm-gateway:PLACEHOLDER",
       "essential": true,
       "portMappings": [
-        { "containerPort": 80, "protocol": "tcp" }
+        { "containerPort": 8080, "protocol": "tcp" }
       ],
       "environment": [
         { "name": "APP_ENV", "value": "dev" },

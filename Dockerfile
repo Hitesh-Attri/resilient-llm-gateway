@@ -18,7 +18,9 @@ COPY src/ ./src/
 RUN adduser --disabled-password --gecos "" appuser
 USER appuser
 
-EXPOSE 80
+EXPOSE 8080
 
 # PYTHONPATH=/app/src makes `main:app` and the `core.*` imports resolve.
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "80"]
+# Port 8080 (not 80): the container runs as non-root (appuser) and Linux
+# forbids non-root processes from binding privileged ports (<1024).
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080"]
