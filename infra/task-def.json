@@ -1,0 +1,38 @@
+{
+  "family": "nexus-dev-resilient-llm-gateway",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "256",
+  "memory": "512",
+  "executionRoleArn": "arn:aws:iam::234189401925:role/nexus-dev-resilient-llm-gateway-execution-role",
+  "taskRoleArn": "arn:aws:iam::234189401925:role/nexus-dev-resilient-llm-gateway-task-role",
+  "containerDefinitions": [
+    {
+      "name": "resilient-llm-gateway",
+      "image": "234189401925.dkr.ecr.ap-south-1.amazonaws.com/nexus/resilient-llm-gateway:PLACEHOLDER",
+      "essential": true,
+      "portMappings": [
+        { "containerPort": 80, "protocol": "tcp" }
+      ],
+      "environment": [
+        { "name": "APP_ENV", "value": "dev" },
+        { "name": "AWS_REGION", "value": "ap-south-1" },
+        { "name": "LLM_CHAIN", "value": "gemini:gemini-3.6-flash,groq:llama-3.3-70b-versatile,openai:gpt-5.6-luna,anthropic:claude-sonnet-4-6" }
+      ],
+      "secrets": [
+        { "name": "ANTHROPIC_API_KEY", "valueFrom": "arn:aws:ssm:ap-south-1:234189401925:parameter/nexus-dev/resilient-llm-gateway/ANTHROPIC_API_KEY" },
+        { "name": "OPENAI_API_KEY",    "valueFrom": "arn:aws:ssm:ap-south-1:234189401925:parameter/nexus-dev/resilient-llm-gateway/OPENAI_API_KEY" },
+        { "name": "GROQ_API_KEY",      "valueFrom": "arn:aws:ssm:ap-south-1:234189401925:parameter/nexus-dev/resilient-llm-gateway/GROQ_API_KEY" },
+        { "name": "GEMINI_API_KEY",    "valueFrom": "arn:aws:ssm:ap-south-1:234189401925:parameter/nexus-dev/resilient-llm-gateway/GEMINI_API_KEY" }
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/nexus-dev-resilient-llm-gateway",
+          "awslogs-region": "ap-south-1",
+          "awslogs-stream-prefix": "ecs"
+        }
+      }
+    }
+  ]
+}

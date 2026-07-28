@@ -1,0 +1,105 @@
+name: Deploy (dev)
+
+# Deploys on every push to main. The bootstrap deploy role only trusts OIDC
+# tokens from refs/heads/main, so deploys can only run from this branch.
+on:
+  push:
+    branches: [main]
+
+# OIDC needs id-token: write; checkout needs contents: read.
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  # Never let two deploys race the same service; cancel the older run.
+  group: deploy-dev-resilient-llm-gateway
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: ap-south-1
+  ECR_REPOSITORY: nexus/resilient-llm-gateway
+  ECS_CLUSTER: nexus-dev-cluster
+  ECS_SERVICE: nexus-dev-resilient-llm-gateway
+  CONTAINER_NAME: resilient-llm-gateway
+  TASK_DEF_FILE: infra/task-def.json
+  IMAGE_TAG_SSM_PARAM: /nexus/dev/resilient-llm-gateway/image_tag
+  DESIRED_COUNT: "1"
+
+jobs:
+  # Gate: don't ship code that fails lint/tests. Mirrors ci.yaml so a direct
+  # push to main can't bypass the checks that PRs run.
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+      - name: Lint
+        run: ruff check src tests
+      - name: Test
+        run: pytest -q
+
+  deploy:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Log in to Amazon ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build, tag, and push image
+        id: build
+        env:
+          REGISTRY: ${{ steps.ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          IMAGE_URI="$REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+          docker build -t "$IMAGE_URI" .
+          docker push "$IMAGE_URI"
+          echo "image_uri=$IMAGE_URI" >> "$GITHUB_OUTPUT"
+
+      # The seed-tag SSM param the ecs-service module reads to build its INITIAL
+      # task definition. CI owns it thereafter; Terragrunt only reads it.
+      - name: Record deployed image tag in SSM
+        run: |
+          aws ssm put-parameter \
+            --name "$IMAGE_TAG_SSM_PARAM" \
+            --type String \
+            --value "${{ github.sha }}" \
+            --overwrite \
+            --region "$AWS_REGION"
+
+      - name: Render task definition (inject image)
+        id: render
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: ${{ env.TASK_DEF_FILE }}
+          container-name: ${{ env.CONTAINER_NAME }}
+          image: ${{ steps.build.outputs.image_uri }}
+
+      # Registers the new task def, points the service at it, scales to
+      # DESIRED_COUNT, and blocks until the deployment reaches steady state.
+      # The service's deployment circuit breaker rolls back a bad image
+      # automatically, and this step fails if that happens.
+      - name: Deploy to ECS
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v2
+        with:
+          task-definition: ${{ steps.render.outputs.task-definition }}
+          service: ${{ env.ECS_SERVICE }}
+          cluster: ${{ env.ECS_CLUSTER }}
+          desired-count: ${{ env.DESIRED_COUNT }}
+          wait-for-service-stability: true
+          wait-for-minutes: 10
